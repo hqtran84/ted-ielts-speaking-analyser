@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tED — IELTS Speaking Analyser</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,400&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--blue:#6b90a8;--blue-light:#d6e8f0;--blue-dark:#3a6478;--red:#b03a2e;--red-light:#f5d5d2;--cream:#faf6ee;--cream-dark:#ede4d4;--ink:#2a1f1a;--ink-mid:#5a4a40;--ink-light:#9a8a80;--green:#276749;--green-light:#c6f6d5;--yellow:#744210;--yellow-light:#fefcbf;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'DM Sans',sans-serif;color:var(--ink);background:var(--cream);min-height:100vh;}
+.topbar{background:var(--cream);border-bottom:3px solid var(--red);padding:16px 24px;}
+.topbar h1{font-family:'Playfair Display',serif;font-size:20px;font-weight:700;}
+.topbar h1 span{color:var(--blue);font-style:italic;}
+.topbar-sub{font-size:12px;color:var(--ink-light);margin-top:2px;}
+.content{max-width:760px;margin:0 auto;padding:24px 16px 60px;}
+.card{background:#fff;border-radius:16px;padding:22px 24px;border:1.5px solid var(--cream-dark);box-shadow:0 4px 16px rgba(42,31,26,0.08);margin-bottom:20px;}
+.card h2{font-family:'Playfair Display',serif;font-size:18px;margin-bottom:12px;color:var(--ink);}
+label{display:block;font-size:13px;font-weight:500;color:var(--ink-mid);margin-bottom:6px;}
+textarea{width:100%;border:1.5px solid var(--cream-dark);border-radius:10px;padding:10px 12px;font-family:'DM Sans',sans-serif;font-size:14px;resize:vertical;min-height:56px;outline:none;}
+textarea:focus{border-color:var(--blue);}
+.input-row{margin-bottom:16px;}
+.record-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+button{font-family:'DM Sans',sans-serif;font-weight:500;border:none;border-radius:24px;padding:11px 22px;font-size:14px;cursor:pointer;transition:transform .12s,background .15s;}
+button:disabled{opacity:.5;cursor:not-allowed;}
+.btn-primary{background:var(--blue);color:#fff;}
+.btn-primary:hover:not(:disabled){background:var(--blue-dark);}
+.btn-record{background:var(--green-light);color:var(--green);}
+.btn-record.recording{background:var(--red);color:#fff;animation:pulse 1.4s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.65}}
+.file-label{background:var(--cream-dark);color:var(--ink-mid);display:inline-block;}
+.file-label:hover{background:#e3d9c8;}
+input[type=file]{display:none;}
+.file-name{font-size:12px;color:var(--ink-light);margin-left:8px;}
+.submit-row{margin-top:18px;}
+.status{font-size:13px;color:var(--ink-light);font-style:italic;margin-top:10px;}
+.error-msg{background:var(--red-light);color:var(--red);padding:12px 16px;border-radius:10px;font-size:13px;margin-top:10px;}
+#results{display:none;}
+.overall-wrap{text-align:center;padding:8px 0 20px;}
+.overall-band{font-family:'Playfair Display',serif;font-size:64px;font-weight:700;line-height:1;}
+.overall-label{font-size:13px;color:var(--ink-light);margin-top:4px;letter-spacing:1px;text-transform:uppercase;}
+.band-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:8px;}
+.band-pill{background:var(--cream);border-radius:12px;padding:14px 12px;text-align:center;border:1.5px solid var(--cream-dark);}
+.band-pill .val{font-family:'Playfair Display',serif;font-size:26px;font-weight:700;}
+.band-pill .lbl{font-size:11px;color:var(--ink-light);margin-top:2px;text-transform:uppercase;letter-spacing:0.5px;}
+.col-green{color:var(--green);}
+.col-yellow{color:#c4872a;}
+.col-red{color:var(--red);}
+.estimate-note{font-size:11px;color:var(--ink-light);text-align:center;margin-top:6px;font-style:italic;}
+.transcript-box{background:var(--cream);border-radius:10px;padding:16px;font-size:14px;line-height:1.7;white-space:pre-wrap;}
+.transcript-box .pause{color:var(--blue-dark);font-style:italic;font-size:12px;}
+.feedback-block{margin-bottom:14px;}
+.feedback-block h3{font-size:13px;color:var(--ink-mid);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;}
+.feedback-block p{font-size:14px;line-height:1.5;}
+.correction{border-left:3px solid var(--red);background:var(--cream);padding:8px 12px;border-radius:0 8px 8px 0;margin-bottom:8px;font-size:13px;}
+.correction .orig{color:var(--red);text-decoration:line-through;}
+.correction .better{color:var(--green);font-weight:500;}
+.correction .why{color:var(--ink-light);display:block;margin-top:2px;font-size:12px;}
+.disclaimer{font-size:12px;color:var(--ink-light);text-align:center;margin-top:24px;line-height:1.6;}
+</style>
+</head>
+<body>
+<div class="topbar">
+    <h1>tED <span>Speaking</span> Analyser</h1>
+    <div class="topbar-sub">Upload or record a spoken response — get a full IELTS Speaking band estimate</div>
+</div>
+<div class="content">
+
+    <div class="card">
+        <h2>1. The question (optional)</h2>
+        <div class="input-row">
+            <label for="question">What was the student responding to? Helps judge coherence.</label>
+            <textarea id="question" placeholder="e.g. Describe a place you would like to visit in the future."></textarea>
+        </div>
+
+        <h2>2. The recording</h2>
+        <div class="record-row">
+            <label class="file-label" for="fileInput">📁 Upload audio file</label>
+            <input type="file" id="fileInput" accept="audio/*">
+            <span class="file-name" id="fileName"></span>
+            <button class="btn-record" id="recordBtn" onclick="toggleRecord()">🎤 Record instead</button>
+        </div>
+        <div class="submit-row">
+            <button class="btn-primary" id="submitBtn" onclick="submitAudio()" disabled>Analyse Speech</button>
+        </div>
+        <div class="status" id="status"></div>
+        <div id="errorBox"></div>
+    </div>
+
+    <div id="results">
+        <div class="card">
+            <div class="overall-wrap">
+                <div class="overall-band" id="overallBand">—</div>
+                <div class="overall-label">Estimated Overall Band</div>
+            </div>
+            <div class="band-grid" id="bandGrid"></div>
+            <div class="estimate-note">Pronunciation band is an estimate — there is no official conversion table from the underlying speech-assessment score.</div>
+        </div>
+
+        <div class="card">
+            <h2>Transcript</h2>
+            <div class="transcript-box" id="transcriptBox"></div>
+        </div>
+
+        <div class="card">
+            <h2>Feedback</h2>
+            <div id="feedbackBox"></div>
+        </div>
+
+        <div class="card" id="correctionsCard" style="display:none">
+            <h2>Suggested corrections</h2>
+            <div id="correctionsBox"></div>
+        </div>
+    </div>
+
+    <div class="disclaimer">This is a coaching estimate generated by AI and automated speech assessment, not a certified IELTS score.</div>
+</div>
+
+<script>
+let mediaRecorder, chunks = [], recording = false, recordedBlob = null, uploadedFile = null;
+
+function toggleRecord(){
+    if(!recording){
+        navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+            chunks = [];
+            mediaRecorder = new MediaRecorder(stream);
+            mediaRecorder.ondataavailable = e => chunks.push(e.data);
+            mediaRecorder.onstop = async () => {
+                const blob = new Blob(chunks, {type:'audio/webm'});
+                const arrayBuffer = await blob.arrayBuffer();
+                const audioCtx = new AudioContext({sampleRate:16000});
+                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                recordedBlob = audioBufferToWav(audioBuffer);
+                uploadedFile = null;
+                document.getElementById('fileName').textContent = '🎙️ recorded clip ready';
+                document.getElementById('submitBtn').disabled = false;
+            };
+            mediaRecorder.start();
+            recording = true;
+            document.getElementById('recordBtn').textContent = '⏹ Stop';
+            document.getElementById('recordBtn').classList.add('recording');
+        }).catch(()=>{
+            showError('Microphone access denied. Please allow microphone access and try again, or upload a file instead.');
+        });
+    } else {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+        recording = false;
+        document.getElementById('recordBtn').textContent = '🎤 Record instead';
+        document.getElementById('recordBtn').classList.remove('recording');
+    }
+}
+
+document.getElementById('fileInput').addEventListener('change', (e)=>{
+    if(e.target.files.length){
+        uploadedFile = e.target.files[0];
+        recordedBlob = null;
+        document.getElementById('fileName').textContent = uploadedFile.name;
+        document.getElementById('submitBtn').disabled = false;
+    }
+});
+
+function audioBufferToWav(buffer){
+    const samples = buffer.getChannelData(0);
+    const wavBuffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(wavBuffer);
+    function writeString(offset, str){ for(let i=0;i<str.length;i++) view.setUint8(offset+i, str.charCodeAt(i)); }
+    writeString(0,'RIFF'); view.setUint32(4, 36 + samples.length*2, true);
+    writeString(8,'WAVE'); writeString(12,'fmt ');
+    view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24, buffer.sampleRate, true); view.setUint32(28, buffer.sampleRate*2, true);
+    view.setUint16(32,2,true); view.setUint16(34,16,true); writeString(36,'data');
+    view.setUint32(40, samples.length*2, true);
+    let offset = 44;
+    for(let i=0;i<samples.length;i++){
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, s<0 ? s*0x8000 : s*0x7FFF, true);
+        offset += 2;
+    }
+    return new Blob([wavBuffer], {type:'audio/wav'});
+}
+
+function showError(msg){
+    document.getElementById('errorBox').innerHTML = `<div class="error-msg">⚠️ ${msg}</div>`;
+}
+function clearError(){
+    document.getElementById('errorBox').innerHTML = '';
+}
+
+function scoreClass(band){
+    if(band === null || band === undefined) return '';
+    if(band >= 7) return 'col-green';
+    if(band >= 5.5) return 'col-yellow';
+    return 'col-red';
+}
+
+async function submitAudio(){
+    const audioBlob = recordedBlob || uploadedFile;
+    if(!audioBlob){ showError('Please record or upload an audio file first.'); return; }
+    clearError();
+    document.getElementById('results').style.display = 'none';
+    document.getElementById('submitBtn').disabled = true;
+    document.getElementById('status').textContent = 'Analysing — transcribing, then scoring… this can take up to a minute.';
+
+    const formData = new FormData();
+    formData.append('file', audioBlob, audioBlob.name || 'recording.wav');
+    formData.append('question', document.getElementById('question').value.trim());
+
+    try{
+        const res = await fetch('/analyse', {method:'POST', body: formData});
+        const data = await res.json();
+        document.getElementById('status').textContent = '';
+        document.getElementById('submitBtn').disabled = false;
+        if(data.error){ showError(data.error); return; }
+        renderResults(data);
+    }catch(e){
+        document.getElementById('status').textContent = '';
+        document.getElementById('submitBtn').disabled = false;
+        showError('Something went wrong reaching the server. Please try again.');
+    }
+}
+
+function renderResults(data){
+    const b = data.bands;
+    const overallEl = document.getElementById('overallBand');
+    overallEl.textContent = b.overall !== null ? b.overall.toFixed(1) : '—';
+    overallEl.className = 'overall-band ' + scoreClass(b.overall);
+
+    const items = [
+        {label:'Fluency & Coherence', val: b.fluency},
+        {label:'Lexical Resource', val: b.lexical},
+        {label:'Grammar', val: b.grammar},
+        {label:'Pronunciation', val: b.pronunciation}
+    ];
+    document.getElementById('bandGrid').innerHTML = items.map(it => `
+        <div class="band-pill">
+            <div class="val ${scoreClass(it.val)}">${it.val !== null && it.val !== undefined ? it.val.toFixed(1) : '—'}</div>
+            <div class="lbl">${it.label}</div>
+        </div>`).join('');
+
+    const transcriptHtml = (data.transcript || '').replace(/\[pause[^\]]*\]/g, m => `<span class="pause">${m}</span>`);
+    document.getElementById('transcriptBox').innerHTML = transcriptHtml || '<em>No transcript available.</em>';
+
+    const fb = data.feedback || {};
+    const fbOrder = [['fluency','Fluency & Coherence'],['lexical','Lexical Resource'],['grammar','Grammar']];
+    document.getElementById('feedbackBox').innerHTML = fbOrder.map(([key,label]) =>
+        fb[key] ? `<div class="feedback-block"><h3>${label}</h3><p>${fb[key]}</p></div>` : ''
+    ).join('') || '<em>No feedback available.</em>';
+
+    const corrections = data.corrections || [];
+    const correctionsCard = document.getElementById('correctionsCard');
+    if(corrections.length){
+        correctionsCard.style.display = '';
+        document.getElementById('correctionsBox').innerHTML = corrections.map(c => `
+            <div class="correction">
+                <span class="orig">${c.original}</span> → <span class="better">${c.better}</span>
+                <span class="why">${c.why || ''}</span>
+            </div>`).join('');
+    } else {
+        correctionsCard.style.display = 'none';
+    }
+
+    document.getElementById('results').style.display = 'block';
+}
+</script>
+</body>
+</html>
