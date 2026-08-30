@@ -10,6 +10,7 @@ import base64
 import threading
 import tempfile
 import wave
+import subprocess
 import httpx
 import librosa
 from scipy.signal import butter, filtfilt
@@ -44,6 +45,35 @@ def save_wav_temp(audio_data, sample_rate=16000):
         pcm = (audio_data * 32767).astype(np.int16)
         wf.writeframes(pcm.tobytes())
     return tmp.name
+
+def transcode_to_wav(input_bytes, sample_rate=16000, timeout=60):
+    """Use ffmpeg (already in the Docker image) to convert any input container —
+    mp4, m4a, mov, webm, wav, mp3, whatever — into 16kHz mono PCM WAV bytes.
+    soundfile/libsndfile alone can't read mp4/m4a, which is what phone voice
+    memos and video recordings are usually saved as. Returns None on failure."""
+    in_tmp = tempfile.NamedTemporaryFile(suffix=".input", delete=False)
+    in_tmp.write(input_bytes)
+    in_tmp.close()
+    out_path = in_tmp.name + ".wav"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", in_tmp.name, "-ar", str(sample_rate), "-ac", "1", "-f", "wav", out_path],
+            capture_output=True, timeout=timeout
+        )
+        if result.returncode != 0 or not os.path.exists(out_path):
+            print(f"ffmpeg transcode failed: {result.stderr.decode(errors='ignore')[-500:]}")
+            return None
+        with open(out_path, "rb") as f:
+            return f.read()
+    except Exception as e:
+        print(f"ffmpeg transcode error: {e}")
+        return None
+    finally:
+        for p in (in_tmp.name, out_path):
+            try:
+                os.unlink(p)
+            except:
+                pass
 
 def detect_pauses(audio_data, sample_rate=16000, min_pause=0.3, frame_length=512, hop_length=256):
     """Find internal silence gaps directly from the waveform's energy envelope.
@@ -320,10 +350,13 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         return {"error": "Speaking analysis unavailable — AZURE_SPEECH_KEY not set in Space settings."}
 
     contents = await file.read()
+    wav_bytes_in = transcode_to_wav(contents)
+    if wav_bytes_in is None:
+        return {"error": "Could not read this audio file — please try a different recording."}
     try:
-        audio_data, _ = sf.read(io.BytesIO(contents))
+        audio_data, _ = sf.read(io.BytesIO(wav_bytes_in))
     except Exception:
-        return {"error": "Could not read this audio file — please try a WAV or MP3 recording."}
+        return {"error": "Could not read this audio file — please try a different recording."}
     if audio_data.ndim > 1:
         audio_data = audio_data[:, 0]
     audio_data = audio_data.astype(np.float32)
