@@ -130,6 +130,7 @@ async def call_gemini(contents, generation_config, retries=2):
             try:
                 return data["candidates"][0]["content"]["parts"][0]["text"]
             except (KeyError, IndexError):
+                print(f"Gemini response missing expected text field: {data}")
                 return None
     return None
 
@@ -142,7 +143,8 @@ def parse_json_loose(text):
         text = re.sub(r"\s*```$", "", text)
     try:
         return json.loads(text)
-    except Exception:
+    except Exception as e:
+        print(f"JSON parse failed ({e}). Raw text: {text[:1000]!r}")
         return None
 
 # Verbatim transcription prompt — reused as-is from the talk-anhnguted-secure app's
