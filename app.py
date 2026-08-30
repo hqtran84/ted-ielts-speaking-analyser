@@ -194,7 +194,7 @@ def merge_pause_durations(transcript, pauses):
 # and pronunciation is intentionally left out (scored separately from raw audio below).
 CONTENT_SCORING_PROMPT_TEMPLATE = """You are an IELTS Speaking examiner. Score the candidate's spoken response below using the official IELTS Speaking band descriptors.
 
-The transcript is verbatim, produced from real audio: [pause Xs] marks a timed silence of X seconds, er/um/uh are fillers, and repeated or corrected phrases are false starts/self-corrections. Use these markers to judge fluency accurately — do not penalise pauses under 1 second, but weigh longer or frequent pauses as fluency breakdowns per the descriptors below.
+The transcript is verbatim, produced from real audio: [pause Xs] marks a timed silence of X seconds, er/um/uh are fillers, and repeated or corrected phrases are false starts/self-corrections. Judge fluency rigorously from this evidence, not generously — do not default to a middle score out of caution. Occasional pauses under 1 second are normal and should not be penalised. But count the actual pauses and fillers in the transcript: several pauses of 1-2 seconds, or any single pause over 2 seconds, is concrete evidence of "long pauses while searching for words" (Band 4) or "repetition and slow speech to keep going" (Band 5) — that evidence should pull the score down to Band 4-5 even if vocabulary and grammar are otherwise fine, unless the pauses are clearly content-related (e.g. genuinely pausing to think through a complex idea) rather than language-related (struggling to find a word or restart a sentence).
 {question_block}
 Candidate's response (verbatim transcript):
 \"\"\"
@@ -319,13 +319,27 @@ def assess_pronunciation_azure_unscripted(audio_data, sample_rate=16000, timeout
         except:
             pass
 
+# Piecewise-linear heuristic mapping Azure's 0-100 PronScore to an IELTS-style
+# 1.0-9.0 band. There is no official Microsoft-to-IELTS conversion table — this is
+# a judgment-call estimate, calibrated against how the official band descriptors
+# read (e.g. Band 5 "L1 accent affects intelligibility at times" implies a score
+# well below native-level, not close to it) rather than a straight-line guess.
+# It's deliberately conservative in the 55-85 range, since that's where most real
+# L2 speakers with a noticeable-but-intelligible accent land. Replace these anchor
+# points with real data once we have Azure scores paired with actual examiner-
+# assigned pronunciation bands (see the plan to calibrate against graded examples).
+PRON_SCORE_BAND_ANCHORS = [(0, 1.0), (40, 2.5), (55, 4.0), (65, 5.0), (75, 6.0), (85, 7.0), (92, 8.0), (100, 9.0)]
+
 def pron_score_to_band(score):
-    """Rough linear heuristic mapping Azure's 0-100 PronScore to an IELTS-style 1.0-9.0
-    band. There is no official Microsoft-to-IELTS conversion table — this is an
-    estimate only, and must be labeled as such wherever it's shown."""
+    """Estimate only — must be labeled as such wherever it's shown."""
     if score is None:
         return None
-    band = 1.0 + (score / 100.0) * 8.0
+    score = max(0.0, min(100.0, score))
+    band = PRON_SCORE_BAND_ANCHORS[-1][1]
+    for (s0, b0), (s1, b1) in zip(PRON_SCORE_BAND_ANCHORS, PRON_SCORE_BAND_ANCHORS[1:]):
+        if s0 <= score <= s1:
+            band = b0 + (score - s0) / (s1 - s0) * (b1 - b0)
+            break
     band = round(band * 2) / 2
     return max(1.0, min(9.0, band))
 
