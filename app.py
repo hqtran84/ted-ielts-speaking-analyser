@@ -113,7 +113,12 @@ async def call_gemini(contents, generation_config, retries=2):
     if not GEMINI_API_KEY:
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    body = {"contents": contents, "generationConfig": generation_config}
+    # gemini-2.5-flash's internal "thinking" tokens count against maxOutputTokens by
+    # default, which can silently eat the whole budget and truncate the real answer.
+    # Neither transcription nor rubric-based scoring benefits from that reasoning, so
+    # disable it unless a caller explicitly asks for a different thinking budget.
+    full_config = {"thinkingConfig": {"thinkingBudget": 0}, **generation_config}
+    body = {"contents": contents, "generationConfig": full_config}
     async with httpx.AsyncClient(timeout=90.0) as client:
         for attempt in range(retries + 1):
             try:
@@ -232,7 +237,7 @@ async def score_content_gemini(annotated_transcript, question=""):
     question_block = f'\n\nThe question/topic the candidate was responding to: "{question}"\n' if question else ""
     prompt = CONTENT_SCORING_PROMPT_TEMPLATE.format(question_block=question_block, transcript=annotated_transcript)
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
-    text = await call_gemini(contents, {"maxOutputTokens": 2048, "temperature": 0.3, "responseMimeType": "application/json"})
+    text = await call_gemini(contents, {"maxOutputTokens": 4096, "temperature": 0.3, "responseMimeType": "application/json"})
     return parse_json_loose(text)
 
 # ── AZURE PRONUNCIATION ASSESSMENT (unscripted) ──────────────────
