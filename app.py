@@ -1,4 +1,5 @@
 import os
+import asyncio
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import HTMLResponse
 import numpy as np
@@ -322,7 +323,13 @@ def assess_pronunciation_azure_unscripted(audio_data, sample_rate=16000, timeout
     """Score pronunciation/fluency directly from open-ended audio, with no reference
     text (unlike the ted-pronunciation Space's word-level assess_with_azure(), which
     needs a known target word). Uses continuous recognition since a full response can
-    span multiple recognized segments; scores are aggregated across all of them."""
+    span multiple recognized segments; scores are aggregated across all of them.
+
+    This function is synchronous and blocks for up to `timeout` seconds
+    (threading.Event().wait()). The /analyse route always calls it via
+    asyncio.to_thread() — calling it directly from an async route would freeze the
+    whole single-worker event loop for up to a minute, including Render's own health
+    checks (every ~5s), which is exactly what caused live 502s before this fix."""
     if not AZURE_SPEECH_KEY:
         return None
     wav_path = save_wav_temp(audio_data, sample_rate)
@@ -648,7 +655,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         return {"error": "Speaking analysis unavailable — AZURE_SPEECH_KEY not set in Space settings."}
 
     contents = await file.read()
-    wav_bytes_in = transcode_to_wav(contents)
+    wav_bytes_in = await asyncio.to_thread(transcode_to_wav, contents)
     if wav_bytes_in is None:
         return {"error": "Could not read this audio file — please try a different recording."}
     try:
@@ -686,7 +693,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
     if not content_scores:
         return {"error": "Scoring failed — please try again."}
 
-    azure_result = assess_pronunciation_azure_unscripted(clean_audio)
+    azure_result = await asyncio.to_thread(assess_pronunciation_azure_unscripted, clean_audio)
     weighted_accuracy = None
     weak_sounds = []
     pronunciation_band = None
