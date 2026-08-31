@@ -245,6 +245,12 @@ def merge_pause_durations(transcript, pauses):
         return "[pause]"
     return re.sub(r"\[\.\.\.\]", repl, transcript)
 
+def count_transcript_words(transcript):
+    """Word count for the speech-rate calculation, with pause markers stripped —
+    those are our own annotations, not something the student actually said."""
+    stripped = re.sub(r"\[pause[^\]]*\]", " ", transcript)
+    return len(re.findall(r"[A-Za-z']+", stripped))
+
 # Content-scoring prompt. The band descriptor text below is the verbatim official
 # wording from IELTS's own "Speaking Band Descriptors" document
 # (ielts.org/cdn/ielts-guides/ielts-speaking-band-descriptors.pdf), covering the full
@@ -511,20 +517,95 @@ def combine_pronunciation_score(weighted_accuracy, prosody):
 # L2 speakers with a noticeable-but-intelligible accent land. Replace these anchor
 # points with real data once we have Azure scores paired with actual examiner-
 # assigned pronunciation bands (see the plan to calibrate against graded examples).
+def _interpolate_piecewise(value, anchors):
+    """Shared piecewise-linear lookup: anchors is a list of (x, band) pairs, sorted by
+    x, mapping a raw measurement to an IELTS-style 1.0-9.0 band with anchor points in
+    between. Used for every "we don't have an official conversion table, but here's a
+    documented, defensible estimate" mapping in this file."""
+    xs = [a[0] for a in anchors]
+    value = max(xs[0], min(xs[-1], value))
+    band = anchors[-1][1]
+    for (x0, b0), (x1, b1) in zip(anchors, anchors[1:]):
+        if x0 <= value <= x1:
+            band = b0 + (value - x0) / (x1 - x0) * (b1 - b0)
+            break
+    band = round(band * 2) / 2
+    return max(1.0, min(9.0, band))
+
 PRON_SCORE_BAND_ANCHORS = [(0, 1.0), (40, 2.5), (55, 4.0), (65, 5.0), (75, 6.0), (85, 7.0), (92, 8.0), (100, 9.0)]
 
 def pron_score_to_band(score):
     """Estimate only — must be labeled as such wherever it's shown."""
     if score is None:
         return None
-    score = max(0.0, min(100.0, score))
-    band = PRON_SCORE_BAND_ANCHORS[-1][1]
-    for (s0, b0), (s1, b1) in zip(PRON_SCORE_BAND_ANCHORS, PRON_SCORE_BAND_ANCHORS[1:]):
-        if s0 <= score <= s1:
-            band = b0 + (score - s0) / (s1 - s0) * (b1 - b0)
-            break
-    band = round(band * 2) / 2
-    return max(1.0, min(9.0, band))
+    return _interpolate_piecewise(score, PRON_SCORE_BAND_ANCHORS)
+
+# ── FLUENCY: deterministic speech-timing composite ───────────────────
+#
+# De Jong et al. (2012) broke L2 utterance fluency into speed, breakdown, and repair
+# fluency, measured as speech rate, mean length of run (words spoken fluently between
+# pauses), and pause frequency/duration. This is the empirical backbone of deployed
+# scorers like ETS's SpeechRater. A meta-analysis (Suzuki et al., 2021) reports these
+# correlate with human proficiency judgments at r=.76 (speech rate), r=.72 (mean
+# length of run), r=-.59 (pause frequency) — not incidental correlations.
+#
+# A directly relevant August 2026 paper (Uehara, "...Why Pause Encoding Does Not
+# Change LLM Fluency Scores") ran a controlled test on exactly the approach this app
+# used before this change: embedding pause markers inline in the transcript text and
+# relying on an LLM to weigh them. Finding: inline pause encoding does NOT reliably
+# improve an LLM's fluency judgment over just giving it aggregate stats — "the fluency
+# signal comes from the measured speech-timing features, not from how pauses are
+# written for the LLM." Their winning approach computed a deterministic composite
+# SEPARATELY from the LLM, then blended the two scores mathematically, reaching higher
+# agreement with human raters than 81% of individual trained human raters.
+#
+# We don't have their calibration data, so the anchor points below are a documented,
+# transparent judgment call informed by published speech-rate/fluency norms — not a
+# reproduction of their exact formula. Replace with real data once available.
+
+SPEECH_RATE_BAND_ANCHORS = [(0, 1.0), (50, 3.0), (70, 4.0), (90, 5.0), (110, 6.0), (130, 7.0), (150, 8.0), (180, 9.0)]
+MLR_BAND_ANCHORS = [(0, 1.0), (2, 3.0), (4, 4.0), (6, 5.0), (8, 6.0), (11, 7.0), (15, 8.0), (20, 9.0)]
+PAUSE_RATIO_BAND_ANCHORS = [(0.0, 9.0), (0.06, 8.0), (0.12, 7.0), (0.18, 6.0), (0.25, 5.0), (0.35, 4.0), (0.50, 2.0), (0.70, 1.0)]
+
+def compute_speech_timing_metrics(word_count, duration_seconds, pauses):
+    """The three De Jong features, computed directly from what we already precisely
+    measure: word_count from the (pause-marker-stripped) transcript, duration_seconds
+    from the actual audio, pauses from detect_pauses()."""
+    if duration_seconds <= 0 or word_count <= 0:
+        return None
+    total_pause_time = sum(p["duration"] for p in pauses)
+    return {
+        "speech_rate_wpm": round(word_count / (duration_seconds / 60), 1),
+        "pause_ratio": round(total_pause_time / duration_seconds, 3),
+        "mean_length_of_run": round(word_count / (len(pauses) + 1), 1)
+    }
+
+def speech_timing_band(metrics):
+    """Deterministic fluency band from the three De Jong features alone, averaged —
+    computed entirely independently of the LLM, per the research above."""
+    if not metrics:
+        return None
+    bands = [
+        _interpolate_piecewise(metrics["speech_rate_wpm"], SPEECH_RATE_BAND_ANCHORS),
+        _interpolate_piecewise(metrics["mean_length_of_run"], MLR_BAND_ANCHORS),
+        _interpolate_piecewise(metrics["pause_ratio"], PAUSE_RATIO_BAND_ANCHORS),
+    ]
+    return round((sum(bands) / len(bands)) * 2) / 2
+
+def blend_fluency_band(deterministic_band, llm_band):
+    """Blend the deterministic speech-timing band with Gemini's own holistic reading
+    (which still separately judges coherence, discourse markers, and topic
+    development — things only a transcript-reader can assess). Weighted toward the
+    deterministic side (65/35), since the cited research found the deterministic
+    composite carries most of the signal and the LLM mainly helps break coarse ties,
+    not the other way around."""
+    parts = [(deterministic_band, 0.65), (llm_band, 0.35)]
+    parts = [(v, w) for v, w in parts if v is not None]
+    if not parts:
+        return None
+    total_weight = sum(w for _, w in parts)
+    blended = sum(v * w for v, w in parts) / total_weight
+    return round(blended * 2) / 2
 
 def combine_overall_band(fluency, lexical, grammar, pronunciation):
     """Average the 4 criteria and apply IELTS's real rounding convention: round to the
@@ -617,7 +698,11 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         composite_pron_score = combine_pronunciation_score(weighted_accuracy, azure_result.get('prosody'))
         pronunciation_band = pron_score_to_band(composite_pron_score)
 
-    fluency_band = content_scores.get('fluency_band')
+    word_count = count_transcript_words(annotated_transcript)
+    timing_metrics = compute_speech_timing_metrics(word_count, duration, pauses)
+    deterministic_fluency_band = speech_timing_band(timing_metrics)
+    llm_fluency_band = content_scores.get('fluency_band')
+    fluency_band = blend_fluency_band(deterministic_fluency_band, llm_fluency_band)
     lexical_band = content_scores.get('lexical_band')
     grammar_band = content_scores.get('grammar_band')
     overall_band = combine_overall_band(fluency_band, lexical_band, grammar_band, pronunciation_band)
@@ -634,6 +719,11 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
             "overall": overall_band
         },
         "pronunciation_band_is_estimate": True,
+        "fluency_detail": {
+            "speech_timing_metrics": timing_metrics,
+            "deterministic_band": deterministic_fluency_band,
+            "llm_band": llm_fluency_band
+        },
         "weakest_sounds": weak_sounds,
         "prosody": prosody_feedback,
         "feedback": content_scores.get('feedback', {}),
