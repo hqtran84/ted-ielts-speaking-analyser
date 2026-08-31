@@ -462,14 +462,18 @@ def classify_prosody(prosody_score):
         return {"level": "mixed", "note": "Stress and intonation are inconsistent — rhythm may be affected by a lack of stress-timing or a rushed pace at times."}
     return {"level": "limited", "note": "Limited control of stress and intonation — practice the natural rhythm of English rather than speaking word-by-word."}
 
-def combine_pronunciation_score(weighted_accuracy, fluency, prosody, completeness):
-    """Composite 0-100 pronunciation score feeding pron_score_to_band(), built from
-    transparent, documented weights rather than Azure's undisclosed internal PronScore
-    formula. Accuracy (now Vietnamese-learner-weighted from real phoneme data) carries
-    the most weight since individual sound correctness is the core of the IELTS
-    Pronunciation criterion; fluency/prosody/completeness fill in the rest. Missing
-    components (e.g. no prosody on an older SDK) are skipped and the rest reweighted."""
-    parts = [(weighted_accuracy, 0.55), (fluency, 0.25), (prosody, 0.15), (completeness, 0.05)]
+def combine_pronunciation_score(weighted_accuracy, prosody):
+    """Composite 0-100 pronunciation score feeding pron_score_to_band(), built only
+    from what IELTS's own Pronunciation descriptors actually describe: individual
+    sound/phonological accuracy, and rhythm/stress-timing/intonation. Deliberately
+    excludes Azure's FluencyScore (pause-gap timing — that's what the separate
+    Fluency & Coherence criterion already measures via Gemini; including it here
+    double-counted a different criterion and inflated this one) and CompletenessScore
+    (defined as "ratio of pronounced words to the reference text," which is
+    meaningless in unscripted mode since there's no reference text — it was
+    effectively a free ~100-point boost from nothing). Missing components (e.g. no
+    prosody on an older SDK) are skipped and the rest reweighted."""
+    parts = [(weighted_accuracy, 0.6), (prosody, 0.4)]
     parts = [(v, w) for v, w in parts if v is not None]
     if not parts:
         return None
@@ -589,10 +593,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         weighted_accuracy = weighted_accuracy_from_phonemes(azure_result.get('phoneme_scores', []))
         weak_sounds = weakest_sounds(azure_result.get('phoneme_scores', []))
         prosody_feedback = classify_prosody(azure_result.get('prosody'))
-        composite_pron_score = combine_pronunciation_score(
-            weighted_accuracy, azure_result.get('fluency'),
-            azure_result.get('prosody'), azure_result.get('completeness')
-        )
+        composite_pron_score = combine_pronunciation_score(weighted_accuracy, azure_result.get('prosody'))
         pronunciation_band = pron_score_to_band(composite_pron_score)
 
     fluency_band = content_scores.get('fluency_band')
