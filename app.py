@@ -191,6 +191,25 @@ async def transcribe_verbatim_gemini(audio_bytes, mime_type="audio/wav"):
     text = await call_gemini(contents, {"maxOutputTokens": 1500, "temperature": 0})
     return text.strip() if text else None
 
+QUESTION_EXTRACTION_PROMPT = (
+    "Extract the exact IELTS speaking question, topic, or cue card text shown in this "
+    "file. Return ONLY the question text itself, nothing else — no markdown, no "
+    "commentary, no quotation marks around it. If it's a cue card with bullet points, "
+    "include all of them as they appear."
+)
+
+async def extract_question_from_file(file_bytes, mime_type):
+    b64 = base64.b64encode(file_bytes).decode("ascii")
+    contents = [{
+        "role": "user",
+        "parts": [
+            {"text": QUESTION_EXTRACTION_PROMPT},
+            {"inline_data": {"mime_type": mime_type, "data": b64}}
+        ]
+    }]
+    text = await call_gemini(contents, {"maxOutputTokens": 1000, "temperature": 0})
+    return text.strip() if text else None
+
 def merge_pause_durations(transcript, pauses):
     """Replace Gemini's [...] pause markers with precisely-measured durations from
     the waveform, in sequence order. Extra/missing markers fall back gracefully."""
@@ -501,6 +520,19 @@ def combine_overall_band(fluency, lexical, grammar, pronunciation):
 def home():
     with open("index.html", encoding="utf-8") as f:
         return f.read()
+
+@app.post("/extract-question")
+async def extract_question(file: UploadFile = File(...)):
+    if not GEMINI_API_KEY:
+        return {"error": "Question extraction unavailable — GEMINI_API_KEY not set in Space settings."}
+    mime_type = file.content_type or ""
+    if not (mime_type.startswith("image/") or mime_type == "application/pdf"):
+        return {"error": "Please upload an image or PDF file."}
+    contents = await file.read()
+    question = await extract_question_from_file(contents, mime_type)
+    if not question:
+        return {"error": "Could not read the question from this file — please try a clearer file, or type the question manually."}
+    return {"question": question}
 
 @app.post("/analyse")
 async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...)):

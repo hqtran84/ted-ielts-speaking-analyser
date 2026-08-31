@@ -76,12 +76,18 @@ input[type=file]{display:none;}
         <div class="input-row">
             <label for="question">What was the student responding to? Helps judge coherence.</label>
             <textarea id="question" placeholder="e.g. Describe a place you would like to visit in the future."></textarea>
+            <div class="record-row" style="margin-top:8px;">
+                <label class="file-label" for="questionFileInput">🖼️ Or upload a photo/PDF of the question</label>
+                <input type="file" id="questionFileInput" accept="image/*,application/pdf">
+                <span class="file-name" id="questionFileName"></span>
+            </div>
+            <div class="status" id="questionStatus"></div>
         </div>
 
         <h2>2. The recording</h2>
         <div class="record-row">
-            <label class="file-label" for="fileInput">📁 Upload audio file</label>
-            <input type="file" id="fileInput" accept="audio/*">
+            <label class="file-label" for="fileInput">📁 Upload audio or video file</label>
+            <input type="file" id="fileInput" accept="audio/*,video/*">
             <span class="file-name" id="fileName"></span>
             <button class="btn-record" id="recordBtn" onclick="toggleRecord()">🎤 Record instead</button>
         </div>
@@ -174,6 +180,28 @@ document.getElementById('fileInput').addEventListener('change', (e)=>{
         recordedBlob = null;
         document.getElementById('fileName').textContent = uploadedFile.name;
         document.getElementById('submitBtn').disabled = false;
+    }
+});
+
+document.getElementById('questionFileInput').addEventListener('change', async (e)=>{
+    if(!e.target.files.length) return;
+    const file = e.target.files[0];
+    document.getElementById('questionFileName').textContent = file.name;
+    document.getElementById('questionStatus').textContent = 'Reading question from file…';
+    clearError();
+
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+
+    try{
+        const res = await fetch('/extract-question', {method:'POST', body: formData});
+        const data = await res.json();
+        document.getElementById('questionStatus').textContent = '';
+        if(data.error){ showError(data.error); return; }
+        document.getElementById('question').value = data.question;
+    }catch(err){
+        document.getElementById('questionStatus').textContent = '';
+        showError('Could not read the question file. Please try again or type the question manually.');
     }
 });
 
