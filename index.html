@@ -102,9 +102,16 @@ input[type=file]{display:none;}
             <div class="estimate-note">Pronunciation band is an estimate — there is no official conversion table from the underlying speech-assessment score.</div>
         </div>
 
-        <div class="card" id="weakSoundsCard" style="display:none">
-            <h2>Sounds to work on</h2>
-            <div class="sound-chips" id="soundChips"></div>
+        <div class="card" id="pronDetailCard" style="display:none">
+            <h2>Pronunciation detail</h2>
+            <div id="weakSoundsSection" style="display:none">
+                <h3 style="font-size:13px;color:var(--ink-mid);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Sounds to work on</h3>
+                <div class="sound-chips" id="soundChips"></div>
+            </div>
+            <div id="prosodySection" style="display:none;margin-top:16px;">
+                <h3 style="font-size:13px;color:var(--ink-mid);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Rhythm &amp; intonation</h3>
+                <p id="prosodyNote" style="font-size:14px;line-height:1.5;"></p>
+            </div>
         </div>
 
         <div class="card">
@@ -204,6 +211,12 @@ function scoreClass(band){
     return 'col-red';
 }
 
+function severityClass(severity){
+    if(severity === 'correct') return 'col-green';
+    if(severity === 'warning') return 'col-yellow';
+    return 'col-red';
+}
+
 async function submitAudio(){
     const audioBlob = recordedBlob || uploadedFile;
     if(!audioBlob){ showError('Please record or upload an audio file first.'); return; }
@@ -249,18 +262,31 @@ function renderResults(data){
         </div>`).join('');
 
     const weakSounds = data.weakest_sounds || [];
-    const weakSoundsCard = document.getElementById('weakSoundsCard');
+    const prosody = data.prosody || null;
+    const pronDetailCard = document.getElementById('pronDetailCard');
+    const weakSoundsSection = document.getElementById('weakSoundsSection');
+    const prosodySection = document.getElementById('prosodySection');
+
     if(weakSounds.length){
-        weakSoundsCard.style.display = '';
+        weakSoundsSection.style.display = '';
         document.getElementById('soundChips').innerHTML = weakSounds.map(s => `
             <div class="sound-chip">
-                <div class="ipa ${scoreClass(s.avg_accuracy / 100 * 9)}">/${s.phoneme}/</div>
+                <div class="ipa ${severityClass(s.severity)}">/${s.phoneme}/</div>
                 <div class="acc">${s.avg_accuracy}% accuracy</div>
                 <div class="words">${(s.example_words || []).join(', ')}</div>
             </div>`).join('');
     } else {
-        weakSoundsCard.style.display = 'none';
+        weakSoundsSection.style.display = 'none';
     }
+
+    if(prosody){
+        prosodySection.style.display = '';
+        document.getElementById('prosodyNote').textContent = prosody.note;
+    } else {
+        prosodySection.style.display = 'none';
+    }
+
+    pronDetailCard.style.display = (weakSounds.length || prosody) ? '' : 'none';
 
     const transcriptHtml = (data.transcript || '').replace(/\[pause[^\]]*\]/g, m => `<span class="pause">${m}</span>`);
     document.getElementById('transcriptBox').innerHTML = transcriptHtml || '<em>No transcript available.</em>';

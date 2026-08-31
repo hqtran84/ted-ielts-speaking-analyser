@@ -387,6 +387,19 @@ def weighted_accuracy_from_phonemes(phoneme_scores):
         total_weight += weight
     return total_score / total_weight if total_weight else None
 
+def classify_phoneme_severity(accuracy):
+    """Discrete correct/warning/incorrect tier instead of a raw percentage — the same
+    3-tier presentation ELSA's API uses (their decision field: correct/warning/
+    incorrect), easier for a student to act on than a number. The 60 cutoff for
+    "incorrect" isn't arbitrary: Azure's own docs define AccuracyScore < 60 as their
+    internal Mispronunciation error type, so we're reusing Azure's own threshold
+    rather than inventing one."""
+    if accuracy >= 80:
+        return "correct"
+    if accuracy >= 60:
+        return "warning"
+    return "incorrect"
+
 def weakest_sounds(phoneme_scores, top_n=5):
     """Group every detected phoneme instance by sound, average its accuracy, and
     return the worst top_n — concrete, actionable "sounds to work on" feedback,
@@ -404,14 +417,31 @@ def weakest_sounds(phoneme_scores, top_n=5):
     summary = [
         {
             "phoneme": ipa,
-            "avg_accuracy": round(sum(d["scores"]) / len(d["scores"]), 1),
+            "avg_accuracy": round(avg_acc, 1),
+            "severity": classify_phoneme_severity(avg_acc),
             "count": len(d["scores"]),
             "example_words": d["example_words"]
         }
         for ipa, d in by_phoneme.items()
+        for avg_acc in [sum(d["scores"]) / len(d["scores"])]
     ]
     summary.sort(key=lambda x: x["avg_accuracy"])
     return summary[:top_n]
+
+def classify_prosody(prosody_score):
+    """Separates rhythm/stress/intonation feedback from individual-sound accuracy,
+    the same distinction ELSA draws between its "pronunciation" and "intonation"
+    scores — but reported as a secondary diagnostic note here rather than a second
+    band, since IELTS's own Pronunciation criterion officially combines both into
+    one score (see the band descriptors: "chunking", "stress-timing", "rhythm" all
+    sit inside the same Pronunciation column, not a separate criterion)."""
+    if prosody_score is None:
+        return None
+    if prosody_score >= 80:
+        return {"level": "good", "note": "Good use of stress, rhythm, and intonation."}
+    if prosody_score >= 60:
+        return {"level": "mixed", "note": "Stress and intonation are inconsistent — rhythm may be affected by a lack of stress-timing or a rushed pace at times."}
+    return {"level": "limited", "note": "Limited control of stress and intonation — practice the natural rhythm of English rather than speaking word-by-word."}
 
 def combine_pronunciation_score(weighted_accuracy, fluency, prosody, completeness):
     """Composite 0-100 pronunciation score feeding pron_score_to_band(), built from
@@ -522,9 +552,11 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
     weighted_accuracy = None
     weak_sounds = []
     pronunciation_band = None
+    prosody_feedback = None
     if azure_result:
         weighted_accuracy = weighted_accuracy_from_phonemes(azure_result.get('phoneme_scores', []))
         weak_sounds = weakest_sounds(azure_result.get('phoneme_scores', []))
+        prosody_feedback = classify_prosody(azure_result.get('prosody'))
         composite_pron_score = combine_pronunciation_score(
             weighted_accuracy, azure_result.get('fluency'),
             azure_result.get('prosody'), azure_result.get('completeness')
@@ -549,6 +581,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         },
         "pronunciation_band_is_estimate": True,
         "weakest_sounds": weak_sounds,
+        "prosody": prosody_feedback,
         "feedback": content_scores.get('feedback', {}),
         "corrections": content_scores.get('corrections', []),
         "azure_raw": azure_result
