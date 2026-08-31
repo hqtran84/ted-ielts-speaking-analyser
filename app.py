@@ -21,6 +21,23 @@ AZURE_SPEECH_REGION = os.environ.get("AZURE_SPEECH_REGION", "eastus")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# Azure SAPI phoneme -> IPA, and difficulty weighting for Vietnamese speakers —
+# reused from the ted-pronunciation Space's app.py, where this weighting is already
+# proven for this student population (vowels and the consonants Vietnamese speakers
+# most often struggle with count for more than easy consonants).
+SAPI_TO_IPA = {
+    'ae':'æ','ey':'eɪ','ah':'ə','ao':'ɔː','aw':'aʊ',
+    'ay':'aɪ','b':'b','ch':'tʃ','d':'d','dh':'ð',
+    'eh':'e','er':'ɜːr','f':'f','g':'g','hh':'h',
+    'ih':'ɪ','iy':'iː','jh':'dʒ','k':'k','l':'l',
+    'm':'m','n':'n','ng':'ŋ','ow':'əʊ','oy':'ɔɪ',
+    'p':'p','r':'r','s':'s','sh':'ʃ','t':'t',
+    'th':'θ','uh':'ʊ','uw':'uː','v':'v','w':'w',
+    'y':'j','z':'z','zh':'ʒ','aa':'ɑː'
+}
+VOWEL_PHONEMES = {'æ','ɪ','ʊ','ə','ɑː','ɔː','eɪ','aɪ','aʊ','ɜːr','iː','uː','əʊ','ɔɪ','e'}
+HARD_CONSONANTS = {'θ','ð','v','z','ʒ','dʒ'}
+
 app = FastAPI()
 
 # ── AUDIO HELPERS ─────────────────────────────────────────
@@ -287,13 +304,31 @@ def assess_pronunciation_azure_unscripted(audio_data, sample_rate=16000, timeout
         def on_recognized(evt):
             if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
                 pa = speechsdk.PronunciationAssessmentResult(evt.result)
+                phoneme_scores = []
+                for word_result in (pa.words or []):
+                    if not (hasattr(word_result, 'phonemes') and word_result.phonemes):
+                        continue
+                    for ph in word_result.phonemes:
+                        try:
+                            accuracy = ph.accuracy_score
+                        except AttributeError:
+                            try:
+                                accuracy = ph.pronunciation_assessment.accuracy_score
+                            except Exception:
+                                continue
+                        phoneme_scores.append({
+                            "phoneme": ph.phoneme.lower(),
+                            "accuracy": accuracy,
+                            "word": word_result.word
+                        })
                 segments.append({
                     "text": evt.result.text,
                     "accuracy": pa.accuracy_score,
                     "fluency": pa.fluency_score,
                     "completeness": pa.completeness_score,
                     "pronunciation": pa.pronunciation_score,
-                    "prosody": getattr(pa, "prosody_score", None)
+                    "prosody": getattr(pa, "prosody_score", None),
+                    "phoneme_scores": phoneme_scores
                 })
 
         def on_stopped(_evt):
@@ -314,6 +349,8 @@ def assess_pronunciation_azure_unscripted(audio_data, sample_rate=16000, timeout
             vals = [s[key] for s in segments if s.get(key) is not None]
             return sum(vals) / len(vals) if vals else None
 
+        all_phoneme_scores = [p for s in segments for p in s.get("phoneme_scores", [])]
+
         return {
             "recognised": " ".join(s["text"] for s in segments).strip(),
             "accuracy": avg("accuracy"),
@@ -321,7 +358,8 @@ def assess_pronunciation_azure_unscripted(audio_data, sample_rate=16000, timeout
             "completeness": avg("completeness"),
             "pronunciation": avg("pronunciation"),
             "prosody": avg("prosody"),
-            "segments": len(segments)
+            "segments": len(segments),
+            "phoneme_scores": all_phoneme_scores
         }
     except Exception as e:
         print(f"Azure unscripted assessment error: {e}")
@@ -332,8 +370,66 @@ def assess_pronunciation_azure_unscripted(audio_data, sample_rate=16000, timeout
         except:
             pass
 
-# Piecewise-linear heuristic mapping Azure's 0-100 PronScore to an IELTS-style
-# 1.0-9.0 band. There is no official Microsoft-to-IELTS conversion table — this is
+def weighted_accuracy_from_phonemes(phoneme_scores):
+    """Vietnamese-learner-weighted average accuracy across every phoneme actually
+    detected in the response — vowels and the hard consonants (θ, ð, v, z, ʒ, dʒ)
+    count for more than easy consonants, same weighting the ted-pronunciation Space
+    already uses. This is what actually grounds the pronunciation score in verified
+    per-sound correctness, rather than trusting Azure's black-box PronScore alone."""
+    if not phoneme_scores:
+        return None
+    total_score = 0.0
+    total_weight = 0.0
+    for p in phoneme_scores:
+        ipa = SAPI_TO_IPA.get(p["phoneme"], p["phoneme"])
+        weight = 1.5 if ipa in VOWEL_PHONEMES else 1.3 if ipa in HARD_CONSONANTS else 1.0
+        total_score += p["accuracy"] * weight
+        total_weight += weight
+    return total_score / total_weight if total_weight else None
+
+def weakest_sounds(phoneme_scores, top_n=5):
+    """Group every detected phoneme instance by sound, average its accuracy, and
+    return the worst top_n — concrete, actionable "sounds to work on" feedback,
+    not just a single opaque number."""
+    if not phoneme_scores:
+        return []
+    by_phoneme = {}
+    for p in phoneme_scores:
+        ipa = SAPI_TO_IPA.get(p["phoneme"], p["phoneme"])
+        entry = by_phoneme.setdefault(ipa, {"scores": [], "example_words": []})
+        entry["scores"].append(p["accuracy"])
+        word = p.get("word")
+        if word and word not in entry["example_words"] and len(entry["example_words"]) < 3:
+            entry["example_words"].append(word)
+    summary = [
+        {
+            "phoneme": ipa,
+            "avg_accuracy": round(sum(d["scores"]) / len(d["scores"]), 1),
+            "count": len(d["scores"]),
+            "example_words": d["example_words"]
+        }
+        for ipa, d in by_phoneme.items()
+    ]
+    summary.sort(key=lambda x: x["avg_accuracy"])
+    return summary[:top_n]
+
+def combine_pronunciation_score(weighted_accuracy, fluency, prosody, completeness):
+    """Composite 0-100 pronunciation score feeding pron_score_to_band(), built from
+    transparent, documented weights rather than Azure's undisclosed internal PronScore
+    formula. Accuracy (now Vietnamese-learner-weighted from real phoneme data) carries
+    the most weight since individual sound correctness is the core of the IELTS
+    Pronunciation criterion; fluency/prosody/completeness fill in the rest. Missing
+    components (e.g. no prosody on an older SDK) are skipped and the rest reweighted."""
+    parts = [(weighted_accuracy, 0.55), (fluency, 0.25), (prosody, 0.15), (completeness, 0.05)]
+    parts = [(v, w) for v, w in parts if v is not None]
+    if not parts:
+        return None
+    total_weight = sum(w for _, w in parts)
+    return sum(v * w for v, w in parts) / total_weight
+
+# Piecewise-linear heuristic mapping the 0-100 composite pronunciation score
+# (combine_pronunciation_score, above) to an IELTS-style 1.0-9.0 band. There is no
+# official Microsoft-to-IELTS conversion table — this is
 # a judgment-call estimate, calibrated against how the official band descriptors
 # read (e.g. Band 5 "L1 accent affects intelligibility at times" implies a score
 # well below native-level, not close to it) rather than a straight-line guess.
@@ -423,7 +519,17 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         return {"error": "Scoring failed — please try again."}
 
     azure_result = assess_pronunciation_azure_unscripted(clean_audio)
-    pronunciation_band = pron_score_to_band(azure_result['pronunciation']) if azure_result else None
+    weighted_accuracy = None
+    weak_sounds = []
+    pronunciation_band = None
+    if azure_result:
+        weighted_accuracy = weighted_accuracy_from_phonemes(azure_result.get('phoneme_scores', []))
+        weak_sounds = weakest_sounds(azure_result.get('phoneme_scores', []))
+        composite_pron_score = combine_pronunciation_score(
+            weighted_accuracy, azure_result.get('fluency'),
+            azure_result.get('prosody'), azure_result.get('completeness')
+        )
+        pronunciation_band = pron_score_to_band(composite_pron_score)
 
     fluency_band = content_scores.get('fluency_band')
     lexical_band = content_scores.get('lexical_band')
@@ -442,6 +548,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
             "overall": overall_band
         },
         "pronunciation_band_is_estimate": True,
+        "weakest_sounds": weak_sounds,
         "feedback": content_scores.get('feedback', {}),
         "corrections": content_scores.get('corrections', []),
         "azure_raw": azure_result

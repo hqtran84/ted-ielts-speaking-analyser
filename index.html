@@ -53,6 +53,11 @@ input[type=file]{display:none;}
 .feedback-block h3{font-size:13px;color:var(--ink-mid);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;}
 .feedback-block p{font-size:14px;line-height:1.5;}
 .correction{border-left:3px solid var(--red);background:var(--cream);padding:8px 12px;border-radius:0 8px 8px 0;margin-bottom:8px;font-size:13px;}
+.sound-chips{display:flex;flex-wrap:wrap;gap:8px;}
+.sound-chip{background:var(--cream);border:1.5px solid var(--cream-dark);border-radius:12px;padding:10px 14px;min-width:90px;}
+.sound-chip .ipa{font-family:'Playfair Display',serif;font-size:20px;font-weight:700;}
+.sound-chip .acc{font-size:12px;margin-top:2px;}
+.sound-chip .words{font-size:11px;color:var(--ink-light);margin-top:2px;}
 .correction .orig{color:var(--red);text-decoration:line-through;}
 .correction .better{color:var(--green);font-weight:500;}
 .correction .why{color:var(--ink-light);display:block;margin-top:2px;font-size:12px;}
@@ -95,6 +100,11 @@ input[type=file]{display:none;}
             </div>
             <div class="band-grid" id="bandGrid"></div>
             <div class="estimate-note">Pronunciation band is an estimate — there is no official conversion table from the underlying speech-assessment score.</div>
+        </div>
+
+        <div class="card" id="weakSoundsCard" style="display:none">
+            <h2>Sounds to work on</h2>
+            <div class="sound-chips" id="soundChips"></div>
         </div>
 
         <div class="card">
@@ -237,6 +247,20 @@ function renderResults(data){
             <div class="val ${scoreClass(it.val)}">${it.val !== null && it.val !== undefined ? it.val.toFixed(1) : '—'}</div>
             <div class="lbl">${it.label}</div>
         </div>`).join('');
+
+    const weakSounds = data.weakest_sounds || [];
+    const weakSoundsCard = document.getElementById('weakSoundsCard');
+    if(weakSounds.length){
+        weakSoundsCard.style.display = '';
+        document.getElementById('soundChips').innerHTML = weakSounds.map(s => `
+            <div class="sound-chip">
+                <div class="ipa ${scoreClass(s.avg_accuracy / 100 * 9)}">/${s.phoneme}/</div>
+                <div class="acc">${s.avg_accuracy}% accuracy</div>
+                <div class="words">${(s.example_words || []).join(', ')}</div>
+            </div>`).join('');
+    } else {
+        weakSoundsCard.style.display = 'none';
+    }
 
     const transcriptHtml = (data.transcript || '').replace(/\[pause[^\]]*\]/g, m => `<span class="pause">${m}</span>`);
     document.getElementById('transcriptBox').innerHTML = transcriptHtml || '<em>No transcript available.</em>';
