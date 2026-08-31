@@ -172,19 +172,40 @@ def parse_json_loose(text):
 # Verbatim transcription prompt — reused as-is from the talk-anhnguted-secure app's
 # transcribeAudio() (talk-anhnguted-secure-5/index.html), which is already proven in
 # production for capturing fillers/false starts/pauses accurately.
-TRANSCRIBE_PROMPT = (
-    "Transcribe this audio VERBATIM. Include all filler words (er, um, uh, like, you "
-    "know), false starts, repetitions, and self-corrections exactly as spoken. Mark "
-    "noticeable pauses with [...]. Do not clean up or improve the speech. Return ONLY "
-    "the raw transcript text, nothing else."
-)
+def build_transcribe_prompt(pause_count):
+    """Grounds Gemini's pause-marking with the exact count already measured, precisely
+    and deterministically, from the raw waveform (detect_pauses(), called before this).
+    Previously the prompt just said "mark noticeable pauses" and left it to Gemini's own
+    subjective judgement of the audio — which meant a real, precisely-timed pause could
+    be silently dropped from the transcript entirely if Gemini didn't think it was
+    "noticeable enough" to mark. Telling it the exact expected count makes that failure
+    mode far less likely, while durations still come from merge_pause_durations()
+    filling in the real measured value for each marker in sequence, unchanged."""
+    base = (
+        "Transcribe this audio VERBATIM. Include all filler words (er, um, uh, like, you "
+        "know), false starts, repetitions, and self-corrections exactly as spoken. Do not "
+        "clean up or improve the speech. Return ONLY the raw transcript text, nothing else."
+    )
+    if pause_count > 0:
+        base += (
+            f" This recording contains exactly {pause_count} pause(s) of 0.3 seconds or "
+            f"longer between words or phrases, precisely measured from the audio waveform. "
+            f"You MUST mark the position of every single one with [...] in your transcript, "
+            f"in chronological order — exactly {pause_count}, no more and no fewer, even if "
+            f"a pause feels brief or unremarkable. Do not use your own judgement about "
+            f"whether a pause is worth marking."
+        )
+    else:
+        base += " There are no pauses of 0.3 seconds or longer in this recording — do not insert any [...] markers."
+    return base
 
-async def transcribe_verbatim_gemini(audio_bytes, mime_type="audio/wav"):
+async def transcribe_verbatim_gemini(audio_bytes, pause_count, mime_type="audio/wav"):
     b64 = base64.b64encode(audio_bytes).decode("ascii")
+    prompt = build_transcribe_prompt(pause_count)
     contents = [{
         "role": "user",
         "parts": [
-            {"text": TRANSCRIBE_PROMPT},
+            {"text": prompt},
             {"inline_data": {"mime_type": mime_type, "data": b64}}
         ]
     }]
@@ -575,7 +596,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
     sf.write(wav_buf, clean_audio, 16000, format='WAV', subtype='PCM_16')
     wav_bytes = wav_buf.getvalue()
 
-    raw_transcript = await transcribe_verbatim_gemini(wav_bytes)
+    raw_transcript = await transcribe_verbatim_gemini(wav_bytes, len(pauses))
     if not raw_transcript:
         return {"error": "Transcription failed — please try again."}
     annotated_transcript = merge_pause_durations(raw_transcript, pauses)
