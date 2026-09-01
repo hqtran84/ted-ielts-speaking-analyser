@@ -496,26 +496,8 @@ def classify_prosody(prosody_score):
         return {"level": "mixed", "note": "Stress and intonation are inconsistent — rhythm may be affected by a lack of stress-timing or a rushed pace at times."}
     return {"level": "limited", "note": "Limited control of stress and intonation — practice the natural rhythm of English rather than speaking word-by-word."}
 
-def combine_pronunciation_score(weighted_accuracy, prosody):
-    """Composite 0-100 pronunciation score feeding pron_score_to_band(), built only
-    from what IELTS's own Pronunciation descriptors actually describe: individual
-    sound/phonological accuracy, and rhythm/stress-timing/intonation. Deliberately
-    excludes Azure's FluencyScore (pause-gap timing — that's what the separate
-    Fluency & Coherence criterion already measures via Gemini; including it here
-    double-counted a different criterion and inflated this one) and CompletenessScore
-    (defined as "ratio of pronounced words to the reference text," which is
-    meaningless in unscripted mode since there's no reference text — it was
-    effectively a free ~100-point boost from nothing). Missing components (e.g. no
-    prosody on an older SDK) are skipped and the rest reweighted."""
-    parts = [(weighted_accuracy, 0.6), (prosody, 0.4)]
-    parts = [(v, w) for v, w in parts if v is not None]
-    if not parts:
-        return None
-    total_weight = sum(w for _, w in parts)
-    return sum(v * w for v, w in parts) / total_weight
-
-# Piecewise-linear heuristic mapping the 0-100 composite pronunciation score
-# (combine_pronunciation_score, above) to an IELTS-style 1.0-9.0 band. There is no
+# Piecewise-linear heuristic mapping a 0-100 pronunciation sub-score to an
+# IELTS-style 1.0-9.0 band. There is no
 # official Microsoft-to-IELTS conversion table — this is
 # a judgment-call estimate, calibrated against how the official band descriptors
 # read (e.g. Band 5 "L1 accent affects intelligibility at times" implies a score
@@ -546,6 +528,30 @@ def pron_score_to_band(score):
     if score is None:
         return None
     return _interpolate_piecewise(score, PRON_SCORE_BAND_ANCHORS)
+
+def pronunciation_band_from_components(weighted_accuracy, prosody):
+    """Weakest-link, not weighted-average: the Pronunciation band is capped by
+    whichever component is worse, not pulled up by the stronger one. individual
+    sound accuracy and rhythm/stress/intonation are two genuinely distinct elements
+    of the official Pronunciation descriptors (see the "chunking... rhythm...
+    intonation and stress" language alongside "individual words or phonemes...
+    mispronounced" at every band level) — a candidate strong in one but weak in the
+    other hasn't fully met the positive features of the higher band on both fronts.
+
+    This mirrors two independent sources: IELTS's own official marking rule ("a
+    candidate must fully fit ALL the positive features of a band's descriptor to be
+    awarded it" — already baked into the content-scoring prompt above) and a real
+    competitor's stated approach: ieltsscience.fun explicitly labels this "Điểm
+    criteria bị giới hạn bởi tiêu chí thấp nhất" (the criterion score is limited by
+    its lowest sub-criterion) directly in its pronunciation breakdown UI. Previously
+    this was a 60/40 weighted average, which let a strong accuracy score paper over
+    weak prosody (or vice versa) — a real source of over-generous scores."""
+    accuracy_band = pron_score_to_band(weighted_accuracy)
+    prosody_band = pron_score_to_band(prosody)
+    bands = [b for b in [accuracy_band, prosody_band] if b is not None]
+    if not bands:
+        return None
+    return min(bands)
 
 # ── FLUENCY: deterministic speech-timing composite ───────────────────
 #
@@ -600,19 +606,18 @@ def speech_timing_band(metrics):
     return round((sum(bands) / len(bands)) * 2) / 2
 
 def blend_fluency_band(deterministic_band, llm_band):
-    """Blend the deterministic speech-timing band with Gemini's own holistic reading
-    (which still separately judges coherence, discourse markers, and topic
-    development — things only a transcript-reader can assess). Weighted toward the
-    deterministic side (65/35), since the cited research found the deterministic
-    composite carries most of the signal and the LLM mainly helps break coarse ties,
-    not the other way around."""
-    parts = [(deterministic_band, 0.65), (llm_band, 0.35)]
-    parts = [(v, w) for v, w in parts if v is not None]
-    if not parts:
+    """Weakest-link, not weighted-average — same principle as
+    pronunciation_band_from_components() above, applied here because speech-timing
+    (speed/pauses/runs) and coherence (topic development, discourse markers) are two
+    genuinely distinct elements of the single Fluency & Coherence criterion. A
+    candidate with fast, low-pause delivery but disjointed, hard-to-follow content
+    (or the reverse: coherent but halting) hasn't fully met the positive features of
+    the higher band on both fronts, so the lower of the two caps the result rather
+    than being averaged up by the stronger one."""
+    bands = [b for b in [deterministic_band, llm_band] if b is not None]
+    if not bands:
         return None
-    total_weight = sum(w for _, w in parts)
-    blended = sum(v * w for v, w in parts) / total_weight
-    return round(blended * 2) / 2
+    return min(bands)
 
 def combine_overall_band(fluency, lexical, grammar, pronunciation):
     """Average the 4 criteria and apply IELTS's real rounding convention: round to the
@@ -702,8 +707,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         weighted_accuracy = weighted_accuracy_from_phonemes(azure_result.get('phoneme_scores', []))
         weak_sounds = weakest_sounds(azure_result.get('phoneme_scores', []))
         prosody_feedback = classify_prosody(azure_result.get('prosody'))
-        composite_pron_score = combine_pronunciation_score(weighted_accuracy, azure_result.get('prosody'))
-        pronunciation_band = pron_score_to_band(composite_pron_score)
+        pronunciation_band = pronunciation_band_from_components(weighted_accuracy, azure_result.get('prosody'))
 
     word_count = count_transcript_words(annotated_transcript)
     timing_metrics = compute_speech_timing_metrics(word_count, duration, pauses)
