@@ -307,8 +307,8 @@ Band 1: No rateable language unless memorised.
 Do not score Pronunciation — that is assessed separately from the raw audio.
 
 Respond with ONLY a JSON object, no markdown, no extra text, in this exact structure:
-{{"fluency_band":6.5,"lexical_band":6.5,"grammar_band":6.5,"feedback":{{"fluency":"2-3 sentences","lexical":"2-3 sentences","grammar":"2-3 sentences"}},"corrections":[{{"original":"exact phrase said","better":"improved version","why":"brief reason"}}]}}
-corrections: max 5, real errors only, empty array if none."""
+{{"fluency_band":6.5,"lexical_band":6.5,"grammar_band":6.5,"feedback":{{"fluency":"2-3 sentences","lexical":"2-3 sentences","grammar":"2-3 sentences"}},"corrections":[{{"original":"exact phrase said, copied verbatim from the transcript so it can be located and highlighted","better":"improved version","why":"brief reason","category":"one of: Word Form, Word Choice, Collocation, Naturalness, Clarity, Grammar"}}]}}
+corrections: max 5, real errors only, empty array if none. "original" must be an exact substring of the transcript above (not paraphrased), so it can be matched and highlighted in place."""
 
 async def score_content_gemini(annotated_transcript, question=""):
     question_block = f'\n\nThe question/topic the candidate was responding to: "{question}"\n' if question else ""
@@ -689,16 +689,28 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
     sf.write(wav_buf, clean_audio, 16000, format='WAV', subtype='PCM_16')
     wav_bytes = wav_buf.getvalue()
 
+    # Azure's pronunciation assessment only needs clean_audio — it has no dependency
+    # on the transcript or content scores below, so start it now and let it run
+    # concurrently with the (necessarily sequential) Gemini calls, instead of
+    # waiting for both of them to finish first. This was previously the single
+    # biggest reason a request took longer than it needed to: Azure's continuous
+    # recognition can itself take several seconds to tens of seconds, and it was
+    # being run strictly after ~2 sequential Gemini round-trips instead of alongside
+    # them.
+    azure_task = asyncio.create_task(asyncio.to_thread(assess_pronunciation_azure_unscripted, clean_audio))
+
     raw_transcript = await transcribe_verbatim_gemini(wav_bytes, len(pauses))
     if not raw_transcript:
+        azure_task.cancel()
         return {"error": "Transcription failed — please try again."}
     annotated_transcript = merge_pause_durations(raw_transcript, pauses)
 
     content_scores = await score_content_gemini(annotated_transcript, question)
     if not content_scores:
+        azure_task.cancel()
         return {"error": "Scoring failed — please try again."}
 
-    azure_result = await asyncio.to_thread(assess_pronunciation_azure_unscripted, clean_audio)
+    azure_result = await azure_task
     weighted_accuracy = None
     weak_sounds = []
     pronunciation_band = None

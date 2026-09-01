@@ -61,6 +61,10 @@ input[type=file]{display:none;}
 .correction .orig{color:var(--red);text-decoration:line-through;}
 .correction .better{color:var(--green);font-weight:500;}
 .correction .why{color:var(--ink-light);display:block;margin-top:2px;font-size:12px;}
+.corr-cat{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;color:var(--blue-dark);background:var(--blue-light);border-radius:6px;padding:2px 6px;white-space:nowrap;}
+.inline-orig{color:var(--red);text-decoration:line-through;opacity:0.75;}
+.inline-better{color:var(--green);font-weight:600;margin-left:2px;}
+.transcript-box .corr-cat{margin-left:4px;vertical-align:middle;}
 .disclaimer{font-size:12px;color:var(--ink-light);text-align:center;margin-top:24px;line-height:1.6;}
 </style>
 </head>
@@ -245,6 +249,24 @@ function severityClass(severity){
     return 'col-red';
 }
 
+function escapeHtml(s){
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function buildTranscriptHtml(transcript, corrections){
+    let escaped = escapeHtml(transcript);
+    (corrections || []).forEach(c => {
+        const orig = escapeHtml(c.original || '');
+        if(!orig) return;
+        const idx = escaped.indexOf(orig);
+        if(idx === -1) return; // Gemini's "original" didn't match verbatim — falls back to the list below only
+        const cat = c.category ? `<span class="corr-cat">${escapeHtml(c.category)}</span>` : '';
+        const replacement = `<span class="inline-orig">${orig}</span><span class="inline-better">${escapeHtml(c.better || '')}</span>${cat}`;
+        escaped = escaped.slice(0, idx) + replacement + escaped.slice(idx + orig.length);
+    });
+    return escaped.replace(/\[pause[^\]]*\]/g, m => `<span class="pause">${m}</span>`);
+}
+
 async function submitAudio(){
     const audioBlob = recordedBlob || uploadedFile;
     if(!audioBlob){ showError('Please record or upload an audio file first.'); return; }
@@ -316,7 +338,8 @@ function renderResults(data){
 
     pronDetailCard.style.display = (weakSounds.length || prosody) ? '' : 'none';
 
-    const transcriptHtml = (data.transcript || '').replace(/\[pause[^\]]*\]/g, m => `<span class="pause">${m}</span>`);
+    const corrections = data.corrections || [];
+    const transcriptHtml = buildTranscriptHtml(data.transcript || '', corrections);
     document.getElementById('transcriptBox').innerHTML = transcriptHtml || '<em>No transcript available.</em>';
 
     const fb = data.feedback || {};
@@ -325,14 +348,14 @@ function renderResults(data){
         fb[key] ? `<div class="feedback-block"><h3>${label}</h3><p>${fb[key]}</p></div>` : ''
     ).join('') || '<em>No feedback available.</em>';
 
-    const corrections = data.corrections || [];
     const correctionsCard = document.getElementById('correctionsCard');
     if(corrections.length){
         correctionsCard.style.display = '';
         document.getElementById('correctionsBox').innerHTML = corrections.map(c => `
             <div class="correction">
-                <span class="orig">${c.original}</span> → <span class="better">${c.better}</span>
-                <span class="why">${c.why || ''}</span>
+                ${c.category ? `<span class="corr-cat">${escapeHtml(c.category)}</span> ` : ''}
+                <span class="orig">${escapeHtml(c.original)}</span> → <span class="better">${escapeHtml(c.better)}</span>
+                <span class="why">${escapeHtml(c.why || '')}</span>
             </div>`).join('');
     } else {
         correctionsCard.style.display = 'none';
