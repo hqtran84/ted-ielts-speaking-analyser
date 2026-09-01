@@ -263,6 +263,10 @@ CONTENT_SCORING_PROMPT_TEMPLATE = """You are an IELTS Speaking examiner. Score t
 Official marking rule: a candidate must fully fit ALL the positive features of a band's descriptor to be awarded that band — not just some of them. If a response only partially matches a band's description, award the lower band. Do not round up for effort or partial credit, and do not default to a middle score out of caution.
 
 The transcript is verbatim, produced from real audio: [pause Xs] marks a timed silence of X seconds, er/um/uh are fillers, and repeated or corrected phrases are false starts/self-corrections. Occasional pauses under 1 second are normal and should not be penalised. But count the actual pauses and fillers: several pauses of 1-2 seconds, or any single pause over 2 seconds, is concrete evidence of "long pauses while searching for words" (Band 4) or "relies on repetition and self-correction... and/or slow speech" (Band 5) — that evidence should pull the fluency score down accordingly even if vocabulary and grammar are otherwise fine, unless the pauses are clearly content-related (genuinely thinking through a complex idea) rather than language-related (struggling to find a word or restart a sentence).
+
+Isolated fillers ("um", "uh") on their own are NOT automatically a fluency problem — the official Band 9 descriptor explicitly says hesitation is fine when it is "used only to prepare the content of the next utterance and not to find words or grammar." A filler followed by fluent continuation is normal native-like speech, not a defect; only treat fillers as evidence against a band when they cluster with the pauses/repetition/self-correction patterns described above.
+
+This is a SPOKEN test, not a written one. Do not penalise Lexical Resource or Grammar for natural conversational register — contractions, casual vocabulary (e.g. "big" instead of "large corporations", "vibe" instead of "atmosphere"), and informal phrasing are normal, expected, and often evidence of natural fluency, not errors. Only flag genuine word-choice, collocation, or grammatical mistakes — not a candidate simply speaking casually instead of formally. Do not suggest "corrections" that just formalise natural spoken register.
 {question_block}
 Candidate's response (verbatim transcript):
 \"\"\"
@@ -575,10 +579,20 @@ def pronunciation_band_from_components(weighted_accuracy, prosody):
 # We don't have their calibration data, so the anchor points below are a documented,
 # transparent judgment call informed by published speech-rate/fluency norms — not a
 # reproduction of their exact formula. Replace with real data once available.
+#
+# MLR and pause-ratio anchors were loosened after testing against a real reference
+# sample (a spoken response labeled Band 9): genuinely fluent, native-quality
+# spontaneous speech ran ~23% pause time and a mean run of ~7 words, which the
+# original anchors scored around Band 5 — treating normal, content-related thinking
+# pauses (explicitly allowed at Band 8-9 per the official descriptor: "hesitation is
+# used only to prepare the content... not to find words or grammar") as a fluency
+# deficit just because they exist. Raw pause time can't distinguish *why* a pause
+# happened, so the curve was widened rather than trying to fix that blind spot.
+# Speech rate wasn't adjusted — it already placed that sample appropriately high.
 
 SPEECH_RATE_BAND_ANCHORS = [(0, 1.0), (50, 3.0), (70, 4.0), (90, 5.0), (110, 6.0), (130, 7.0), (150, 8.0), (180, 9.0)]
-MLR_BAND_ANCHORS = [(0, 1.0), (2, 3.0), (4, 4.0), (6, 5.0), (8, 6.0), (11, 7.0), (15, 8.0), (20, 9.0)]
-PAUSE_RATIO_BAND_ANCHORS = [(0.0, 9.0), (0.06, 8.0), (0.12, 7.0), (0.18, 6.0), (0.25, 5.0), (0.35, 4.0), (0.50, 2.0), (0.70, 1.0)]
+MLR_BAND_ANCHORS = [(0, 1.0), (2, 3.0), (3, 4.0), (4, 5.0), (5, 6.0), (7, 7.5), (10, 8.5), (14, 9.0)]
+PAUSE_RATIO_BAND_ANCHORS = [(0.0, 9.0), (0.10, 8.5), (0.20, 8.0), (0.30, 7.0), (0.40, 5.5), (0.50, 4.0), (0.60, 2.5), (0.75, 1.0)]
 
 def compute_speech_timing_metrics(word_count, duration_seconds, pauses):
     """The three De Jong features, computed directly from what we already precisely
