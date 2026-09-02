@@ -93,6 +93,38 @@ def transcode_to_wav(input_bytes, sample_rate=16000, timeout=60):
             except:
                 pass
 
+def compress_for_diarization(audio_data, sample_rate=16000, bitrate="32k", timeout=60):
+    """Encode audio to low-bitrate mono MP3 for the diarization call only. Diarization
+    just needs to tell two voices apart and time their turns — it doesn't need the
+    full-fidelity 16kHz PCM the rest of the pipeline uses. A multi-minute recording's
+    raw WAV is tens of MB; base64-encoding that for a Gemini request risks OOMing or
+    timing out Render's free-tier 512MB worker. 32kbps mono cuts an 8-9 minute
+    recording from ~30MB down to a couple MB. Returns (bytes, mime_type), or
+    (None, None) on failure — caller should fail open onto single-speaker handling."""
+    in_tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    in_tmp.close()
+    out_path = in_tmp.name + ".mp3"
+    try:
+        sf.write(in_tmp.name, audio_data, sample_rate, format='WAV', subtype='PCM_16')
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", in_tmp.name, "-ac", "1", "-b:a", bitrate, "-f", "mp3", out_path],
+            capture_output=True, timeout=timeout
+        )
+        if result.returncode != 0 or not os.path.exists(out_path):
+            print(f"ffmpeg diarization-compress failed: {result.stderr.decode(errors='ignore')[-500:]}")
+            return None, None
+        with open(out_path, "rb") as f:
+            return f.read(), "audio/mp3"
+    except Exception as e:
+        print(f"ffmpeg diarization-compress error: {e}")
+        return None, None
+    finally:
+        for p in (in_tmp.name, out_path):
+            try:
+                os.unlink(p)
+            except:
+                pass
+
 def detect_pauses(audio_data, sample_rate=16000, min_pause=0.3, frame_length=512, hop_length=256):
     """Find internal silence gaps directly from the waveform's energy envelope.
     Leading/trailing silence is excluded — only pauses between speech count."""
@@ -766,9 +798,8 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
     # isolated Part 2 monologue — see the diarization functions above for why this
     # has to happen at the waveform level, not just by filtering text afterward.
     multi_speaker_detected = False
-    diarize_buf = io.BytesIO()
-    sf.write(diarize_buf, clean_audio, 16000, format='WAV', subtype='PCM_16')
-    diarization = await diarize_candidate_segments(diarize_buf.getvalue())
+    diarize_bytes, diarize_mime = await asyncio.to_thread(compress_for_diarization, clean_audio)
+    diarization = await diarize_candidate_segments(diarize_bytes, mime_type=diarize_mime) if diarize_bytes else None
     if diarization and diarization.get("single_speaker") is False:
         spliced = splice_candidate_audio(clean_audio, diarization.get("candidate_segments") or [])
         if spliced is not None and len(spliced) / 16000 >= 3.0:
