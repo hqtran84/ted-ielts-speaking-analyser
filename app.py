@@ -335,14 +335,24 @@ async def diarize_candidate_segments_chunked(clean_audio, sample_rate=16000):
             break
         start = end - DIARIZE_CHUNK_OVERLAP_SECONDS
 
+    # Render's free-tier worker has ~1 shared vCPU. Firing every window's ffmpeg
+    # encode + Gemini call fully concurrently (a 13-minute recording needs ~12
+    # windows) starved the process badly enough in testing to blow past the
+    # platform's request timeout (a 520 after 277s, vs. a clean 259s success for an
+    # 8-window recording at the same full concurrency). Bounding concurrency keeps
+    # each window's work from being CPU-starved by the others, which in practice
+    # finishes sooner overall than letting all of them contend for the same core.
+    semaphore = asyncio.Semaphore(3)
+
     async def diarize_one_window(start_s, end_s):
-        start_i = int(start_s * sample_rate)
-        end_i = int(end_s * sample_rate)
-        chunk_audio = clean_audio[start_i:end_i]
-        chunk_bytes, chunk_mime = await asyncio.to_thread(compress_for_diarization, chunk_audio, sample_rate)
-        if not chunk_bytes:
-            return None
-        local_segments = await diarize_chunk_candidate_segments(chunk_bytes, mime_type=chunk_mime)
+        async with semaphore:
+            start_i = int(start_s * sample_rate)
+            end_i = int(end_s * sample_rate)
+            chunk_audio = clean_audio[start_i:end_i]
+            chunk_bytes, chunk_mime = await asyncio.to_thread(compress_for_diarization, chunk_audio, sample_rate)
+            if not chunk_bytes:
+                return None
+            local_segments = await diarize_chunk_candidate_segments(chunk_bytes, mime_type=chunk_mime)
         if local_segments is None:
             return None
         global_segments = []
