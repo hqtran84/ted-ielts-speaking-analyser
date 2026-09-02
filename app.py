@@ -247,6 +247,123 @@ async def diarize_candidate_segments(audio_bytes, mime_type="audio/wav"):
     text = await call_gemini(contents, {"maxOutputTokens": 2048, "temperature": 0, "responseMimeType": "application/json"})
     return parse_json_loose(text)
 
+# Live-tested against a real 8.6-minute Q&A recording: a single Gemini pass over the
+# WHOLE recording correctly diarized a 60s clip but badly leaked on the full file — it
+# missed a multi-minute examiner feedback/scoring monologue near the end entirely,
+# apparently because DIARIZE_PROMPT's "if only one speaker throughout, assume it's the
+# candidate" shortcut breaks down for a *window* of a longer test, where a long
+# single-voice stretch is just as likely to be the examiner (asking an extended
+# question, or giving closing feedback) as the candidate. Chunking into windows near
+# the size that tested reliably, and asking each chunk to positively identify the
+# candidate's turns (never assuming a lone voice must be the candidate), fixes both
+# problems: shorter context is easier for the model to track precisely, and there's no
+# single-speaker-implies-candidate assumption left to break.
+DIARIZE_CHUNK_SECONDS = 75
+DIARIZE_CHUNK_OVERLAP_SECONDS = 8
+
+CHUNK_DIARIZE_PROMPT = (
+    "This is one short clip from a longer IELTS speaking test recording. It may "
+    "contain an examiner (asking questions, giving instructions, or — near the end of "
+    "a test — giving closing feedback and a score) and/or a candidate (answering the "
+    "examiner's questions). Do NOT assume that if only one voice is speaking "
+    "throughout this clip, it must be the candidate — it is equally possible the "
+    "examiner is the only one speaking throughout this whole clip (e.g. asking an "
+    "extended question, or delivering feedback/a score at the end of the test).\n\n"
+    "Identify ONLY the time ranges within THIS CLIP where the CANDIDATE is speaking "
+    "— never the examiner, even for brief acknowledgements like 'okay' or 'thank "
+    "you'. Respond with JSON in this exact structure: "
+    '{"candidate_segments": [{"start": 3.2, "end": 15.0}]} — start/end in seconds '
+    "from the beginning of THIS CLIP (not the full recording). If the candidate does "
+    'not speak at all in this clip, respond with {"candidate_segments": []}.'
+)
+
+async def diarize_chunk_candidate_segments(audio_bytes, mime_type="audio/mp3"):
+    """Same shape of call as diarize_candidate_segments, but for one chunk using the
+    role-aware CHUNK_DIARIZE_PROMPT. Returns a list of {"start","end"} (clip-local
+    seconds) or None on failure."""
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    contents = [{
+        "role": "user",
+        "parts": [
+            {"text": CHUNK_DIARIZE_PROMPT},
+            {"inline_data": {"mime_type": mime_type, "data": b64}}
+        ]
+    }]
+    text = await call_gemini(contents, {"maxOutputTokens": 1024, "temperature": 0, "responseMimeType": "application/json"})
+    parsed = parse_json_loose(text)
+    if parsed is None:
+        return None
+    return parsed.get("candidate_segments") or []
+
+def _merge_segments(segments, gap_tolerance=0.25):
+    """Sort and merge touching/overlapping {"start","end"} segments — needed because
+    adjacent chunks overlap by DIARIZE_CHUNK_OVERLAP_SECONDS, so the same moment of
+    candidate speech can be reported by two chunks."""
+    if not segments:
+        return []
+    segments = sorted(segments, key=lambda s: s["start"])
+    merged = [dict(segments[0])]
+    for seg in segments[1:]:
+        last = merged[-1]
+        if seg["start"] <= last["end"] + gap_tolerance:
+            last["end"] = max(last["end"], seg["end"])
+        else:
+            merged.append(dict(seg))
+    return merged
+
+async def diarize_candidate_segments_chunked(clean_audio, sample_rate=16000):
+    """Entry point the /analyse endpoint should use. Recordings short enough to fit in
+    one diarization chunk go through the original single-pass diarize_candidate_segments
+    (already proven reliable at that size). Longer recordings are split into
+    overlapping windows, diarized independently and concurrently, then merged back into
+    one candidate-segments list in the full recording's timebase. Returns the same
+    shape as diarize_candidate_segments — {"single_speaker": bool, "candidate_segments":
+    [...]} — or None if every chunk's call/parse failed (caller fails open)."""
+    total_seconds = len(clean_audio) / sample_rate
+    if total_seconds <= DIARIZE_CHUNK_SECONDS + DIARIZE_CHUNK_OVERLAP_SECONDS:
+        diarize_bytes, diarize_mime = await asyncio.to_thread(compress_for_diarization, clean_audio, sample_rate)
+        if not diarize_bytes:
+            return None
+        return await diarize_candidate_segments(diarize_bytes, mime_type=diarize_mime)
+
+    windows = []
+    start = 0.0
+    while start < total_seconds:
+        end = min(start + DIARIZE_CHUNK_SECONDS, total_seconds)
+        windows.append((start, end))
+        if end >= total_seconds:
+            break
+        start = end - DIARIZE_CHUNK_OVERLAP_SECONDS
+
+    async def diarize_one_window(start_s, end_s):
+        start_i = int(start_s * sample_rate)
+        end_i = int(end_s * sample_rate)
+        chunk_audio = clean_audio[start_i:end_i]
+        chunk_bytes, chunk_mime = await asyncio.to_thread(compress_for_diarization, chunk_audio, sample_rate)
+        if not chunk_bytes:
+            return None
+        local_segments = await diarize_chunk_candidate_segments(chunk_bytes, mime_type=chunk_mime)
+        if local_segments is None:
+            return None
+        global_segments = []
+        for seg in local_segments:
+            s, e = seg.get("start"), seg.get("end")
+            if s is None or e is None or e <= s:
+                continue
+            global_segments.append({"start": start_s + s, "end": min(start_s + e, end_s)})
+        return global_segments
+
+    window_results = await asyncio.gather(*[diarize_one_window(s, e) for s, e in windows])
+    if all(r is None for r in window_results):
+        return None
+
+    all_segments = []
+    for r in window_results:
+        if r:
+            all_segments.extend(r)
+
+    return {"single_speaker": False, "candidate_segments": _merge_segments(all_segments)}
+
 def splice_candidate_audio(audio_data, segments, sample_rate=16000):
     """Concatenate only the given (start, end) second-ranges out of audio_data.
     Segments with missing/invalid/out-of-range bounds are skipped rather than
@@ -798,8 +915,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
     # isolated Part 2 monologue — see the diarization functions above for why this
     # has to happen at the waveform level, not just by filtering text afterward.
     multi_speaker_detected = False
-    diarize_bytes, diarize_mime = await asyncio.to_thread(compress_for_diarization, clean_audio)
-    diarization = await diarize_candidate_segments(diarize_bytes, mime_type=diarize_mime) if diarize_bytes else None
+    diarization = await diarize_candidate_segments_chunked(clean_audio)
     if diarization and diarization.get("single_speaker") is False:
         spliced = splice_candidate_audio(clean_audio, diarization.get("candidate_segments") or [])
         if spliced is not None and len(spliced) / 16000 >= 3.0:
