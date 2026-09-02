@@ -170,6 +170,70 @@ def parse_json_loose(text):
         print(f"JSON parse failed ({e}). Raw text: {text[:1000]!r}")
         return None
 
+# ── SPEAKER DIARIZATION ───────────────────────────────────
+#
+# Everything downstream (pause detection, speech rate, Azure's pronunciation
+# assessment) operates on the raw waveform's timing, not on text — so if a
+# recording includes an examiner/interviewer's voice (a real Part 1 or Part 3 Q&A,
+# not just an isolated Part 2 monologue), filtering their words out of the
+# transcript afterward isn't enough. Their pauses, speaking time, and pronunciation
+# would still be scored as if they were the candidate's. The fix has to happen
+# before anything else runs: identify which stretches of the audio are the
+# candidate, splice those into a candidate-only waveform, and let the rest of the
+# pipeline run on that exactly as it already does for single-speaker audio.
+
+DIARIZE_PROMPT = (
+    "Listen to this audio. It contains either a single speaker (a student speaking "
+    "alone, e.g. answering one prompt or giving a monologue), or two speakers: an "
+    "examiner/interviewer asking questions or giving instructions, and a candidate/"
+    "student answering them.\n\n"
+    "If there is only one speaker throughout, respond with exactly this JSON: "
+    '{"single_speaker": true}\n\n'
+    "If there are two speakers, identify ONLY the time ranges where the CANDIDATE "
+    "(the one answering questions, not the one asking them or giving instructions) "
+    "is speaking. Respond with JSON in this exact structure: "
+    '{"single_speaker": false, "candidate_segments": [{"start": 12.5, "end": 45.0}]} '
+    "— start/end in seconds from the beginning of the audio, as many segments as "
+    "needed to cover every candidate turn, in chronological order. Exclude every "
+    "moment the examiner/interviewer speaks, including brief instructions or "
+    "acknowledgements like 'okay' or 'thank you, let's move on'."
+)
+
+async def diarize_candidate_segments(audio_bytes, mime_type="audio/wav"):
+    """Returns a parsed dict ({"single_speaker": True} or {"single_speaker": False,
+    "candidate_segments": [...]})," or None if the call/parse failed — callers should
+    treat None the same as single_speaker: True (fail open onto the original audio
+    rather than failing the whole request over a diarization hiccup)."""
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    contents = [{
+        "role": "user",
+        "parts": [
+            {"text": DIARIZE_PROMPT},
+            {"inline_data": {"mime_type": mime_type, "data": b64}}
+        ]
+    }]
+    text = await call_gemini(contents, {"maxOutputTokens": 2048, "temperature": 0, "responseMimeType": "application/json"})
+    return parse_json_loose(text)
+
+def splice_candidate_audio(audio_data, segments, sample_rate=16000):
+    """Concatenate only the given (start, end) second-ranges out of audio_data.
+    Segments with missing/invalid/out-of-range bounds are skipped rather than
+    raising, so one bad segment from Gemini doesn't sink the whole request. Returns
+    None if nothing usable survives (caller should fall back to the original audio)."""
+    total_len = len(audio_data)
+    chunks = []
+    for seg in segments:
+        start_s, end_s = seg.get("start"), seg.get("end")
+        if start_s is None or end_s is None or end_s <= start_s:
+            continue
+        start_i = max(0, int(start_s * sample_rate))
+        end_i = min(total_len, int(end_s * sample_rate))
+        if end_i > start_i:
+            chunks.append(audio_data[start_i:end_i])
+    if not chunks:
+        return None
+    return np.concatenate(chunks)
+
 # Verbatim transcription prompt — reused as-is from the talk-anhnguted-secure app's
 # transcribeAudio() (talk-anhnguted-secure-5/index.html), which is already proven in
 # production for capturing fillers/false starts/pauses accurately.
@@ -697,6 +761,25 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
     if rms_after < 0.005:
         return {"error": "Too much background noise — please use a quieter recording"}
 
+    # Identify and strip out a second speaker (examiner/interviewer) before anything
+    # else runs, so a real Part 1/3 Q&A recording scores correctly, not just an
+    # isolated Part 2 monologue — see the diarization functions above for why this
+    # has to happen at the waveform level, not just by filtering text afterward.
+    multi_speaker_detected = False
+    diarize_buf = io.BytesIO()
+    sf.write(diarize_buf, clean_audio, 16000, format='WAV', subtype='PCM_16')
+    diarization = await diarize_candidate_segments(diarize_buf.getvalue())
+    if diarization and diarization.get("single_speaker") is False:
+        spliced = splice_candidate_audio(clean_audio, diarization.get("candidate_segments") or [])
+        if spliced is not None and len(spliced) / 16000 >= 3.0:
+            clean_audio = spliced
+            multi_speaker_detected = True
+            # duration was computed from the original, pre-splice audio above (used
+            # later for speech rate) — it must reflect the candidate-only length now,
+            # or speech rate would be computed against dead time the candidate wasn't
+            # even speaking during (the examiner's turns).
+            duration = len(clean_audio) / 16000
+
     pauses = detect_pauses(clean_audio)
 
     wav_buf = io.BytesIO()
@@ -748,6 +831,7 @@ async def analyse_speaking(question: str = Form(""), file: UploadFile = File(...
         "transcript": annotated_transcript,
         "question": question,
         "pauses": pauses,
+        "multi_speaker_detected": multi_speaker_detected,
         "bands": {
             "fluency": fluency_band,
             "lexical": lexical_band,
